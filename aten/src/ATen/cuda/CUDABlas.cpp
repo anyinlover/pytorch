@@ -1639,7 +1639,7 @@ bool gemm_and_bias(
   }
 #endif
 
-  cublasLtEpilogue_t epilogue = GEMMAndBiasActivationEpilogue::None;
+  cublasLtEpilogue_t epilogue;
   if (activation == GEMMAndBiasActivationEpilogue::RELU) {
     epilogue = CUBLASLT_EPILOGUE_RELU;
   } else if (activation == GEMMAndBiasActivationEpilogue::GELU) {
