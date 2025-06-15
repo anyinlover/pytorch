@@ -405,9 +405,11 @@ function(torch_compile_options libname)
       )
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
       list(APPEND private_compile_options -Wredundant-move)
+      list(APPEND private_compile_options -Wno-error=deprecated-declarations)
     endif()
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       list(APPEND private_compile_options -Wextra-semi -Wno-error=extra-semi -Wmove)
+      list(APPEND private_compile_options -Wno-return-std-move)
     else()
       list(APPEND private_compile_options
         # Considered to be flaky.  See the discussion at
