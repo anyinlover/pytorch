@@ -5,7 +5,7 @@ This module provides functionality to load and use a pre-trained neural network
 for predicting the performance of triton kernels.
 """
 
-import copy
+# Default model path - can be overridden by environment variable
 import os
 import time
 from collections.abc import Sequence
@@ -13,17 +13,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-from pyre_extensions import assert_is_instance  # type: ignore[import-untyped]
 
 import torch
 import torch.nn as nn
+from pyre_extensions import assert_is_instance  # type: ignore[import-untyped]
 from torch._inductor.kernel_lut import TritonGEMMConfig
-from torch.optim.lr_scheduler import StepLR
 
-
-
-# Default model path - can be overridden by environment variable
-import os
 script_dir = os.path.dirname(__file__)
 DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "aoti_mm_model.pt2")
 MODEL_PATH = os.environ.get("TRITON_KERNEL_SELECTION_MODEL_PATH", DEFAULT_MODEL_PATH)
@@ -200,7 +195,8 @@ class ModelWrapper:
                 4.19098234,
                 0.9045909,
                 1.28331208,
-            ], device="cuda"
+            ],
+            device="cuda",
         )
 
         # Standard deviation values for standardizing input features
@@ -218,7 +214,8 @@ class ModelWrapper:
                 0.93872011,
                 0.57455891,
                 0.5837217,
-            ], device="cuda"
+            ],
+            device="cuda",
         )
 
     def vec(
@@ -328,24 +325,6 @@ class ModelWrapper:
         df["total_gb"] = get_total_gb_feature(df=df).astype(np.float32)
         df["total_gflop"] = get_total_gflop_feature(df=df).astype(np.float32)
         df["flops_per_byte"] = df["total_gflop"] / df["total_gb"]
-
-        # Reorder columns to match expected model input
-        df = df[
-            [
-                "dtype_size",
-                "dim_m",
-                "dim_n",
-                "dim_k",
-                "total_gb",
-                "total_gflop",
-                "flops_per_byte",
-                "config_block_k",
-                "config_block_m",
-                "config_block_n",
-                "config_num_stages",
-                "config_num_warps",
-            ]
-        ]
 
         # Standardize the input
         inp, _, _ = get_nn_x(
