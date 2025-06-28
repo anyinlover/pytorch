@@ -5,7 +5,7 @@ import unittest.mock as mock
 import numpy as np
 import pandas as pd
 import torch
-from torch._inductor.mm_kernel_prediction_model import (
+from torch._inductor.models.mm_kernel_prediction_model import (
     get_nn_x,
     get_total_gb_feature,
     get_total_gflop_feature,
@@ -292,7 +292,7 @@ class TestMMKernelPredictionModel(TestCase):
 
         # bfloat16 should have the same encoding as float16
         result_bfloat = wrapper.encode(256, 128, 64, torch.bfloat16, configs)
-        self.assertEqual(result_bfloat.shape, shape)
+        self.assertEqual(result_bfloat.shape, expected_shape)
         self.assertTrue(torch.allclose(result_bfloat, result))
 
         # Test with float32

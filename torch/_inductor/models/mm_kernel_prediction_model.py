@@ -15,7 +15,6 @@ import pandas as pd  # type: ignore[import-untyped]
 
 import torch
 import torch.nn as nn
-from pyre_extensions import assert_is_instance  # type: ignore[import-untyped]
 from torch._inductor.kernel_lut import TritonGEMMConfig
 
 # Default model path - can be overridden by environment variable
@@ -115,13 +114,9 @@ def get_nn_x(
 
     x_tens = torch.from_numpy(x_df.astype(float).to_numpy()).to(device="cuda")
     if mean is None:
-        mean = torch.from_numpy(
-            assert_is_instance(x_df.mean(), pd.Series).to_numpy()
-        ).to(device="cuda")
+        mean = torch.from_numpy(x_df.mean().to_numpy()).to(device="cuda")
     if std is None:
-        std = torch.from_numpy(assert_is_instance(x_df.std(), pd.Series).to_numpy()).to(
-            device="cuda"
-        )
+        std = torch.from_numpy(x_df.std().to_numpy()).to(device="cuda")
     x_tens -= mean
     x_tens /= std
     return x_tens.to(torch.float32), mean, std

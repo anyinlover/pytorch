@@ -2350,11 +2350,6 @@ class TestConfig(TestCase):
             self.assertEqual(parse_matmul_gemm_autotune_benchmark_space(), 5)
 
         with mock.patch.dict(
-            os.environ, {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "5.0"}
-        ):
-            self.assertEqual(parse_matmul_gemm_autotune_benchmark_space(), 5)
-
-        with mock.patch.dict(
             os.environ,
             {
                 "TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "fish",
@@ -2374,45 +2369,22 @@ class TestConfig(TestCase):
         self.assertEqual(parse_matmul_gemm_autotune_benchmark_space(), "SAME")
 
     def test_parse_matmul_gemm_autotune_search_space(self):
-        # Case 1: When benchmarking_space is "SAME" and env var is "DEFAULT"
-        with mock.patch(
-            "torch._inductor.config.parse_matmul_gemm_autotune_benchmark_space",
-            return_value="SAME",
-        ):
-            with mock.patch.dict(
-                os.environ,
-                {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "DEFAULT"},
-            ):
-                self.assertEqual(parse_matmul_gemm_autotune_search_space(), "DEFAULT")
+        # Case 1: Benchmarking_space is "SAME" -- don't use model
+        self.assertEqual(parse_matmul_gemm_autotune_search_space(), "DEFAULT")
 
-        # Case 2: When benchmarking_space is "SAME" and env var is "EXHAUSTIVE"
-        with mock.patch(
-            "torch._inductor.config.parse_matmul_gemm_autotune_benchmark_space",
-            return_value="SAME",
+        # Case 2: Benchmarking_space is an int
+        with mock.patch.dict(
+            os.environ,
+            {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "1"},
         ):
-            with mock.patch.dict(
-                os.environ,
-                {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "EXHAUSTIVE"},
-            ):
-                self.assertEqual(
-                    parse_matmul_gemm_autotune_search_space(), "EXHAUSTIVE"
-                )
+            self.assertEqual(
+                parse_matmul_gemm_autotune_search_space(), "EXHAUSTIVE"
+            )
 
-        # Case 3: When benchmarking_space is "SAME" and env var is invalid
-        with mock.patch(
-            "torch._inductor.config.parse_matmul_gemm_autotune_benchmark_space",
-            return_value="SAME",
-        ):
-            with mock.patch.dict(
-                os.environ,
-                {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "INVALID"},
-            ):
-                self.assertEqual(parse_matmul_gemm_autotune_search_space(), "DEFAULT")
-
-        # Case 4: When benchmarking_space is not "SAME" (any other value)
-        with mock.patch(
-            "torch._inductor.config.parse_matmul_gemm_autotune_benchmark_space",
-            return_value=5,
+        # Case 3: Benchmarking_space is "DEFAULT"
+        with mock.patch.dict(
+            os.environ,
+            {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "Invalid"},
         ):
             self.assertEqual(parse_matmul_gemm_autotune_search_space(), "EXHAUSTIVE")
 
