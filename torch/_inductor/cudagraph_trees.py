@@ -331,6 +331,8 @@ def get_container(device_index: int) -> TreeManagerContainer:
     container_dict = get_obj(local, "tree_manager_containers")
     lock = get_obj(local, "tree_manager_locks")[device_index]
 
+    # What does the lock do if the lock sits in thread-local storage?
+    # Inforce sequential consistency?
     with lock:
         if device_index not in container_dict:
             container_dict[device_index] = TreeManagerContainer(device_index)
@@ -348,6 +350,7 @@ def get_manager(
 
 def cudagraphify_impl(
     model: ModelType,
+    # Some inputs are ints, while others are SymInts, hmmm....
     inputs: list[InputType],
     static_input_idxs: Sequence[int],
     *args: Any,
@@ -366,11 +369,14 @@ def cudagraphify_impl(
     def deferred_cudagraphify(inputs: list[InputType]) -> OutputType:
         nonlocal has_warn
 
+        # Okay, so these form a key that we use to create different
+        # cuda graphs.
         int_key = get_ints(inputs)
         fn = fn_cache.get(int_key)
         if fn is not None:
             return fn(inputs)
 
+        # Yeah, recording a graph key
         if int_key is None:
             log.info("recording cudagraph tree for graph without symints")
         else:
@@ -385,6 +391,7 @@ def cudagraphify_impl(
         new_static_input_idxs = remove_unaligned_input_idxs(inputs, static_input_idxs)
         copy_misaligned_inputs(inputs, check_input_idxs)
 
+        # here is thre real cudagraphify
         fn, out = cudagraphify(model, inputs, new_static_input_idxs, *args, **kwargs)
         # cudagraph will already clones input locally, no need to copy back
         mutated_input_idxs: OrderedSet[int] = OrderedSet()
@@ -441,6 +448,7 @@ def cudagraphify(
         else (CompilationMode.INFERENCE if is_inference else CompilationMode.FORWARD)
     )
 
+    # What is this context manager good for?
     with dynamo_timed_cudagraph("cudagraphify.get_container", compile_id, mode):
         manager = get_container(device_index).get_tree_manager()
 

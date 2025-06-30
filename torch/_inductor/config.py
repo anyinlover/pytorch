@@ -190,6 +190,7 @@ static_weight_shapes = True
 
 # put correctness assertions in generated code
 size_asserts = os.environ.get("TORCHINDUCTOR_SIZE_ASSERTS", "1") == "1"
+# This seems incredibly valuable.
 nan_asserts = os.environ.get("TORCHINDUCTOR_NAN_ASSERTS") == "1"
 scalar_asserts = os.environ.get("TORCHINDUCTOR_SCALAR_ASSERTS", "1") == "1"
 
@@ -1074,6 +1075,21 @@ class triton:
     # possible. Simplifies a lot of things.
     cudagraphs_elide_input_output_copies = True
 
+    # # Use cudagraphs on output code
+    # _cudagraph_trees = True  # Use a private field to store the actual value
+    
+    # @property
+    # @classmethod
+    # def cudagraph_trees(cls):
+    #     return cls._cudagraph_trees
+    
+    # @cudagraph_trees.setter
+    # @classmethod
+    # def cudagraph_trees(cls, value):
+    #     import traceback
+    #     print("GALVEZ: setting cudagraph_trees")
+    #     traceback.print_stack()
+    #     cls._cudagraph_trees = value
     # Use cudagraph trees for memory pooling if `cudagraphs` is True
     cudagraph_trees = True
 
@@ -1738,5 +1754,6 @@ if TYPE_CHECKING:
     from torch.utils._config_typing import *  # noqa: F401, F403
 
 
+# Okay, so patch definition is here.
 # adds patch, save_config, etc
 install_config_module(sys.modules[__name__])

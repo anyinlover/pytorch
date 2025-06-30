@@ -354,6 +354,7 @@ class CMake:
 
         from .env import build_type
 
+        # Need to add to this.
         build_args = [
             "--build",
             ".",
@@ -387,4 +388,5 @@ class CMake:
 
             # CMake 3.12 provides a '-j' option.
             build_args += ["-j", max_jobs]
+        build_args += ["--", "-k", "0"]
         self.run(build_args, my_env)
