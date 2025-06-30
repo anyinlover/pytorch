@@ -1075,7 +1075,7 @@ elseif(USE_CUDA)
         torch_cpu
         torch_cuda
     )
-    if($ENV{ATEN_STATIC_CUDA})
+    if(CAFFE2_STATIC_LINK_CUDA)
       target_link_libraries(torch_cuda_linalg PRIVATE CUDA::cusolver_static)
     else()
       target_link_libraries(torch_cuda_linalg PRIVATE CUDA::cusolver)
