@@ -411,6 +411,10 @@ class FunctionalTensorMode(TorchDispatchMode):
             # in normal torch.compile IR, we decompose functional composite ops
             return True
 
+        r = maybe_handle_decomp(contextlib.nullcontext, func, args, kwargs)
+        if r is not NotImplemented:
+            return r
+
         if (
             func not in FunctionalTensor.metadata_fns
             and _can_decompose(func)
