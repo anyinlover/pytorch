@@ -247,10 +247,20 @@ class UserDefinedClassVariable(UserDefinedVariable):
         # Otherwise, it would be wrapped as UserDefinedObjectVariable(collections.OrderedDict.fromkeys),
         # and we need duplicate code to handle both cases.
         if (
-            self.value in {collections.OrderedDict, collections.defaultdict}
+            # Use issubclass to work with *dict subclasses
+            issubclass(
+                self.value, (dict, collections.OrderedDict, collections.defaultdict)
+            )
             and name == "fromkeys"
         ):
-            return super().var_getattr(tx, name)
+            m = inspect.getattr_static(self.value, name)
+            if m in dict_methods:
+                return super().var_getattr(tx, name)
+            else:
+                # dict subclass overloads "fromkeys"
+                return variables.UserDefinedDictVariable(self.value()).var_getattr(
+                    tx, name
+                )
 
         try:
             obj = inspect.getattr_static(self.value, name)
@@ -393,9 +403,10 @@ class UserDefinedClassVariable(UserDefinedVariable):
                 source = CallFunctionNoArgsSource(source)
             return VariableTracker.build(tx, self.value.__subclasses__(), source)
         elif (
-            self.value in {collections.OrderedDict, collections.defaultdict}
-            and name == "fromkeys"
-        ):
+            is_subclass := issubclass(
+                self.value, (dict, collections.OrderedDict, collections.defaultdict)
+            )
+        ) and name == "fromkeys":
             from .builtin import BuiltinVariable
 
             return BuiltinVariable.call_custom_dict_fromkeys(
