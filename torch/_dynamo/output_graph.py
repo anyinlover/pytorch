@@ -343,6 +343,7 @@ class StackLocalsMetadata:
     locals_ctx_args: list[tuple[str, tuple[Any, ...]]] = dc_field(default_factory=list)
 
 
+# TODO: Can I access the OutputGraph in a torch.compile backend?
 class OutputGraph(OutputGraphGuardsState):
     """
     Wrapper class to hold outputs of InstructionTranslator.  Mainly the

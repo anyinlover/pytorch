@@ -912,6 +912,7 @@ struct PrivatePool {
   PrivatePool(MempoolId_t id, CUDAAllocator* allocator = nullptr)
       : id(std::move(id)),
         allocator_(allocator),
+        // PrivatePool is assigned here.
         large_blocks(/*small=*/false, this),
         small_blocks(/*small=*/true, this) {}
   PrivatePool(const PrivatePool&) = delete;
@@ -1340,12 +1341,16 @@ class DeviceCachingAllocator {
         // Search pool
         get_free_block(params)
         // Trigger callbacks and retry search
+        // how do I set these callbacks? Why might I want to do that? This is used for CUDA IPC only right now apparently.
         || (trigger_free_memory_callbacks(params) && get_free_block(params));
 
     // Can't reuse an existing block; try to get a new one.
     if (!block_found) {
       // Do garbage collection if the flag is set.
+
+      // why doesn't garbage collection garbage collect for mempools?
       if (C10_UNLIKELY(
+              // set to 0.0 apparently
               set_fraction &&
               CUDAAllocatorConfig::garbage_collection_threshold() > 0.0)) {
         garbage_collect_cached_blocks(context);
@@ -1377,9 +1382,12 @@ class DeviceCachingAllocator {
             return std::this_thread::get_id() == tid;
           };
           beginAllocateToPool(mempool_id, filter);
+          // there are apparently two different pools for each
+          // PrivatePool, one for small and large blocks.
           auto& mempool = get_pool(size, stream);
           AllocParams mempool_params(
               device, size, stream, &mempool, alloc_size, stats);
+          // what is this for?
           mempool_params.stat_types = get_stat_types_for_pool(mempool);
           block_found = get_free_block(mempool_params);
           endAllocateToPool(mempool_id);
@@ -2956,8 +2964,7 @@ class DeviceCachingAllocator {
   }
 
   /** Free one or more oversize blocks to the system allocator.  But only enough
-   * **/
-  /** to satisfy the target size **/
+   *  to satisfy the target size **/
   bool release_available_cached_blocks(
       const AllocParams& p,
       const std::shared_ptr<GatheredContext>& context) {
@@ -3066,6 +3073,7 @@ class DeviceCachingAllocator {
     delete block;
   }
 
+  // when is release_block called?
   void release_block(
       Block* block,
       const std::shared_ptr<GatheredContext>& context) {
@@ -3080,6 +3088,7 @@ class DeviceCachingAllocator {
         block->pool->owner_MempoolId(),
         context ? context : block->context_when_segment_allocated);
 
+    // when is release_block called?
     auto* pool = block->pool;
     if (pool->owner_PrivatePool && pool->owner_PrivatePool->allocator()) {
       // If there is an active mempool with a given allocator,
