@@ -4,6 +4,7 @@ import unittest.mock as mock
 
 import numpy as np
 import pandas as pd
+
 import torch
 from torch._inductor.models.mm_kernel_prediction_model import (
     get_nn_x,

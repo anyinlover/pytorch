@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 from torch._inductor.kernel_lut import TritonGEMMConfig
 
+
 # Default model path - can be overridden by environment variable
 script_dir = os.path.dirname(__file__)
 DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "aoti_mm_model.pt2")

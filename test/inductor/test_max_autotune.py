@@ -2377,9 +2377,7 @@ class TestConfig(TestCase):
             os.environ,
             {"TORCHINDUCTOR_MATMUL_GEMM_AUTOTUNE_BENCHMARK_SPACE": "1"},
         ):
-            self.assertEqual(
-                parse_matmul_gemm_autotune_search_space(), "EXHAUSTIVE"
-            )
+            self.assertEqual(parse_matmul_gemm_autotune_search_space(), "EXHAUSTIVE")
 
         # Case 3: Benchmarking_space is "DEFAULT"
         with mock.patch.dict(
