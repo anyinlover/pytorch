@@ -8943,6 +8943,17 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
             s[-1] = 0
             test(u.mm(s.diag()).mm(v))
 
+        # Test case from PyTorch issue #154312: numerically singular matrix
+        # This matrix is mathematically singular but has tiny non-zero diagonal elements
+        # in LU factorization, requiring threshold-based singularity detection
+        issue_154312_matrix = torch.tensor([[1.0, 2.0, 3.0],
+                                           [2.0, 5.0, 6.0],
+                                           [3.0, 6.0, 9.0]], dtype=dtype, device=device)
+        test_single_det(issue_154312_matrix,
+                       (torch.zeros((), dtype=dtype, device=device),
+                        torch.full((), -inf, dtype=dtype, device=device)),
+                       'issue #154312 numerically singular matrix')
+
         # Small values to test numerical stability. Note that we don't scale
         # this matrix.
         r = torch.randn(512, 512, dtype=dtype, device=device)
@@ -9000,6 +9011,7 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
             run_test(matsize, batchdims, mat_chars=['non_sing'])
             run_test(matsize, batchdims, mat_chars=['sym', 'sym_pd', 'sym_psd'])
             run_test(matsize, batchdims, mat_chars=['sing', 'non_sing'])
+
 
     @skipCUDAIfNoMagma
     @skipCPUIfNoLapack

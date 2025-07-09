@@ -402,11 +402,66 @@ TORCH_IMPL_FUNC(_linalg_slogdet_out)(const Tensor& A, const Tensor& sign, const 
   at::linalg_lu_factor_ex_out(const_cast<Tensor&>(LU), const_cast<Tensor&>(pivots), const_cast<Tensor&>(info), A.is_contiguous() && !A.is_complex() ? A.mH() : A);
 
   auto diag_U = LU.diagonal(0, -2, -1);
-  // sign
-  at::mul_out(const_cast<Tensor&>(sign), diag_U.sgn().prod(-1), lu_det_P(pivots));
-
-  // logabsdet
-  at::sum_out(const_cast<Tensor&>(logabsdet), diag_U.abs().log_(), -1);
+  
+  // Fix for PyTorch issue #154312: logdet returns incorrect finite values for singular matrices
+  // 
+  // SOLUTION: Two-tier approach following NumPy's strategy:
+  // 1. Primary: Use LAPACK's built-in singularity detection (info > 0)
+  // 2. Backup: Custom threshold-based detection for numerical edge cases
+  //
+  // References:
+  // - NumPy's slogdet uses LAPACK info parameter as primary detection:
+  //   https://github.com/numpy/numpy/blob/main/numpy/linalg/umath_linalg.cpp (lines 1010-1207)
+  //
+  // The threshold formula (eps * max_diag * n * safety_factor) is custom-designed for this
+  // specific PyTorch issue where LU factorization produces tiny (~1e-16) instead of exact
+  // zeros. The formula components:
+  // - eps: machine precision for the data type
+  // - max_diag: largest diagonal element (for relative scaling)  
+  // - n: matrix dimension (error accumulation factor)
+  // - safety_factor: 10.0 (conservative multiplier to avoid false positives)
+  
+  auto abs_diag = diag_U.abs();
+  bool is_singular = false;
+  
+  // Tier 1: Check LAPACK's built-in singularity detection (info > 0 means singular)
+  if (info.numel() > 0) {
+    if (info.dim() == 0) {
+      is_singular = (info.item<int>() > 0);
+    } else {
+      auto info_values = info.accessor<int, 1>();
+      for (int64_t i = 0; i < info.numel(); i++) {
+        if (info_values[i] > 0) {
+          is_singular = true;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Tier 2: Threshold-based backup detection for numerical edge cases
+  if (!is_singular && abs_diag.numel() > 0) {
+    auto max_diag_val = abs_diag.max().item<double>();
+    if (max_diag_val > 0) {
+      // Custom threshold formula designed for this specific numerical issue
+      auto eps_val = (A.scalar_type() == at::ScalarType::Float || A.scalar_type() == at::ScalarType::ComplexFloat) 
+                     ? std::numeric_limits<float>::epsilon() 
+                     : std::numeric_limits<double>::epsilon();
+      auto threshold_val = eps_val * max_diag_val * A.size(-1) * 10.0;
+      is_singular = (abs_diag <= threshold_val).any().item<bool>();
+    } else {
+      is_singular = true; // All diagonal elements are zero
+    }
+  }
+  
+  // Set results based on singularity detection
+  if (is_singular) {
+    sign.zero_();
+    logabsdet.fill_(-std::numeric_limits<double>::infinity());
+  } else {
+    sign.copy_(diag_U.sgn().prod(-1) * lu_det_P(pivots));
+    at::sum_out(const_cast<Tensor&>(logabsdet), abs_diag.log_(), -1);
+  }
 }
 
 std::tuple<Tensor, Tensor> linalg_slogdet(const Tensor& A) {
