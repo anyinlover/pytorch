@@ -1,5 +1,6 @@
 # Owner(s): ["module: fx"]
 import copy
+import operator
 import unittest
 from typing import Optional
 
@@ -238,7 +239,8 @@ class TestDCE(TestCase):
 
     def test_impure_random(self):
         """
-        Test that DCE doesn't remove call_function for torch.rand.
+        Test that DCE doesn't remove call_function for torch.rand and other random functions.
+        Tests both FX tracing and AOT compilation (issue #151524).
         """
 
         class TestModule(torch.nn.Module):
@@ -246,8 +248,92 @@ class TestDCE(TestCase):
                 x = torch.rand([10])  # noqa: F841
                 return a * 2
 
-        # %torch.rand should not be removed because it has side effects.
+        # Test FX tracing + DCE
         self._run_dce_and_test(TestModule(), expect_dce_changes=False)
+
+        # Test comprehensive random functions in AOT compilation
+        class ComprehensiveRandomModule(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                # Test various random functions that should be preserved
+                a = torch.rand(1)  # noqa: F841
+                b = torch.randn(1)  # noqa: F841
+                c = torch.randint(0, 10, (1,))  # noqa: F841
+                d = torch.randperm(5)  # noqa: F841
+                e = torch.normal(0, 1, (1,))  # noqa: F841
+                f = torch.poisson(torch.tensor([1.0]))  # noqa: F841
+                g = torch.rand(1)  # Used
+                return x + g
+
+        def aot_backend(gm, example_inputs):
+            def count_random_ops():
+                return len(
+                    [
+                        n
+                        for n in gm.graph.nodes
+                        if n.op == "call_function"
+                        and any(
+                            fn in str(n.target)
+                            for fn in [
+                                "rand",
+                                "randn",
+                                "randint",
+                                "randperm",
+                                "normal",
+                                "poisson",
+                            ]
+                        )
+                    ]
+                )
+
+            rand_count = count_random_ops()
+            gm.graph.eliminate_dead_code()
+            self.assertEqual(
+                count_random_ops(), rand_count, "Random ops should be preserved"
+            )
+            return gm.forward
+
+        model = ComprehensiveRandomModule()
+        torch.manual_seed(42)
+        eager_result = model(torch.tensor([1.0]))
+        torch.manual_seed(42)
+        compiled_result = torch.compile(model, backend=aot_backend)(torch.tensor([1.0]))
+        self.assertEqual(eager_result, compiled_result)
+
+        # Test that random operations with explicit generators CAN be eliminated
+        # Manual graph creation since FX tracing optimizes away unused operations
+        g = torch.fx.Graph()
+        x, gen = g.placeholder("x"), g.placeholder("gen")
+        g.call_function(torch.rand, args=(torch.Size([2]),), kwargs={"generator": gen})
+        g.call_function(torch.randn, args=(torch.Size([3]),), kwargs={"generator": gen})
+        g.output(g.call_function(operator.mul, args=(x, 2)))
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        def count_random_ops():
+            return len(
+                [
+                    n
+                    for n in gm.graph.nodes
+                    if n.op == "call_function"
+                    and any(fn in str(n.target) for fn in ["rand", "randn"])
+                ]
+            )
+
+        # Verify random ops with generators are not impure and get eliminated
+        self.assertEqual(count_random_ops(), 2, "Should have 2 random ops before DCE")
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and any(
+                fn in str(node.target) for fn in ["rand", "randn"]
+            ):
+                self.assertFalse(
+                    node.is_impure(),
+                    f"Random op {node.target} with generator should not be impure",
+                )
+
+        changed = gm.graph.eliminate_dead_code()
+        self.assertEqual(
+            count_random_ops(), 0, "Random ops with generators should be eliminated"
+        )
+        self.assertTrue(changed, "DCE should eliminate unused generator random ops")
 
     def test_impure_kwargs(self):
         """

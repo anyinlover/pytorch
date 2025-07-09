@@ -744,6 +744,32 @@ class Node(_NodeBase):
                     # impure since it mutates RNG state
                     return True
 
+            # Handle Python random functions that don't have _nondeterministic_seeded
+            # but still affect global RNG state (issue #151524)
+            # These should be impure regardless of impure_random setting to maintain
+            # consistency between eager and compiled execution
+            _random_functions = {
+                torch.rand,
+                torch.randn,
+                torch.randint,
+                torch.randperm,
+                torch.rand_like,
+                torch.randn_like,
+                torch.randint_like,
+                torch.normal,
+                torch.poisson,
+                torch.bernoulli,
+                torch.multinomial,
+            }
+
+            if self.target in _random_functions:
+                # Only impure if using global RNG (no generator or generator=None)
+                # Random operations with explicit non-None generators don't affect global state
+                has_generator = "generator" in self.kwargs
+                generator_val = self.kwargs.get("generator")
+                uses_global_rng = not has_generator or generator_val is None
+                return uses_global_rng
+
             return self.target in _side_effectful_functions
 
         # Check if an impure module.
