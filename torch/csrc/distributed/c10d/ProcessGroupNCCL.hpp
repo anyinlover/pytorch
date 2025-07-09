@@ -541,7 +541,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
 
     // Optional "parent" backend and color to create communicators from
     // via `ncclCommSplit`
-    std::shared_ptr<ProcessGroupNCCL> split_from;
+    c10::intrusive_ptr<ProcessGroupNCCL> split_from;
     // Color to use for `ncclCommSplit`, values:
     // * Non-negative value: in group;
     // * NCCL_SPLIT_NOCOLOR (-1): not in group;
@@ -967,6 +967,13 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   void waitForPendingWorks() override;
 
   void enableCollectivesTiming() override;
+
+  c10::intrusive_ptr<Backend> splitBackend(
+      const std::vector<int>& ranks,
+      const c10::intrusive_ptr<Backend::Options> opts,
+      const std::string& groupDesc) override;
+
+  c10::intrusive_ptr<Store> getStore() override;
 
   // Helper function for iteratively aborting communicators in the provided map
   void abortCommsFromMap(

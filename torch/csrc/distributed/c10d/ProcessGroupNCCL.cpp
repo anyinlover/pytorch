@@ -1316,6 +1316,52 @@ void ProcessGroupNCCL::enableCollectivesTiming() {
   enableTiming_.store(true);
 }
 
+c10::intrusive_ptr<Backend> ProcessGroupNCCL::splitBackend(
+    const std::vector<int>& ranks,
+    const c10::intrusive_ptr<Backend::Options> opts,
+    const std::string& groupDesc) {
+  auto deviceIdx = guessDeviceId();
+  TORCH_CHECK(
+      deviceIdx >= 0,
+      "ProcessGroupNCCL::splitBackend: rank ",
+      rank_,
+      " has no device is bound to this rank.")
+  auto device = at::Device(at::DeviceType::CUDA, deviceIdx);
+  auto it = std::find(ranks.begin(), ranks.end(), rank_);
+  int groupRank;
+  if (it == ranks.end()) {
+    // This rank is not in the new group, so no_color split should be called
+    performNocolorSplit(device);
+    return nullptr;
+  } else {
+    groupRank = std::distance(ranks.begin(), it);
+  }
+
+  auto ncclOpts = c10::dynamic_intrusive_pointer_cast<Options>(opts);
+  TORCH_CHECK(
+      ncclOpts != nullptr,
+      "is not in the new group, and no device is bound to this rank. ")
+
+  std::vector<uint64_t> globalRanksInGroup;
+  for (auto rank : ranks) {
+    globalRanksInGroup.emplace_back(groupRanks()[rank]);
+  }
+  ncclOpts->split_from =
+      c10::intrusive_ptr<ProcessGroupNCCL>::unsafe_reclaim_from_nonowning(this);
+  ncclOpts->global_ranks_in_group = globalRanksInGroup;
+  auto color = genNcclSplitColor(ranks);
+  ncclOpts->split_color = color;
+  ncclOpts->group_name = c10::str(pg_uid_, ":split:", color);
+  auto pg = c10::make_intrusive<ProcessGroupNCCL>(
+      store_->clone(), groupRank, ranks.size(), ncclOpts);
+  pg->eagerConnectSingleDevice(device);
+  return c10::static_intrusive_pointer_cast<Backend>(pg);
+}
+
+c10::intrusive_ptr<Store> ProcessGroupNCCL::getStore() {
+  return store_;
+}
+
 bool ProcessGroupNCCL::waitForFutureOrTimeout(
     std::future<bool>& fut,
     const std::chrono::milliseconds& timeOutMilSec,

@@ -80,6 +80,35 @@ class ProcessGroupNCCLTest(MultiProcessTestCase):
         t = torch.rand(10, device=device)
         group.allreduce(t).wait()
 
+    @requires_nccl()
+    @skip_if_lt_x_gpu(2)
+    def test_group_split(self):
+        os.environ["RANK"] = str(self.rank)
+        os.environ["WORLD_SIZE"] = str(self.world_size)
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = "29500"
+
+        device = torch.device("cuda", self.rank)
+
+        from torch.distributed import ProcessGroupNCCL
+
+        opts = ProcessGroupNCCL.Options()
+
+        group = dist2.new_group(
+            backend="nccl",
+            timeout=timedelta(seconds=60),
+            device=device,
+            pg_options=opts,
+        )
+        subgroup = dist2.split_group([0], group, timedelta(seconds=30))
+        if self.rank == 0:
+            assert subgroup is not None
+            self.assertEqual(subgroup.size(), 1)
+            backend = subgroup._get_backend(torch.device("cuda"))
+            self.assertEqual(backend.options._timeout, timedelta(seconds=30))
+        else:
+            self.assertEqual(subgroup, None)
+
 
 if __name__ == "__main__":
     assert not torch.cuda._initialized, (
