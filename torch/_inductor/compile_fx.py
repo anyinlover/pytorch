@@ -53,6 +53,7 @@ from torch._functorch._aot_autograd.subclass_parametrization import (
 )
 from torch._functorch.aot_autograd import (
     aot_export_module,
+    GraphOutputName,
     make_boxed_func,
     SerializableAOTDispatchCompiler,
 )
@@ -407,16 +408,17 @@ def _unlift_graph(
     placeholder_nodes = gm.graph.find_nodes(op="placeholder")
     lifted_inputs: list[Optional[FQN]] = []
 
-    # In AOTI, module parameters and buffers are not lifted as graph inputs.
-    # As a result, mutation to buffers has side effect which makes their initial
-    # values different from Eager. So we clone them here as a copy.
-    # We are not cloning for parameters, although it will be needed if we want to
-    # support training.
+    # In AOTI, module parameters and buffers are not lifted as graph inputs.  As a
+    # result, mutation to buffers has side effect which makes their initial values
+    # different from Eager.  So we clone them here as a copy.
     for node in placeholder_nodes:
         node_name = node.name
         if node_name in graph_signature.inputs_to_parameters:
             parameter_name = graph_signature.inputs_to_parameters[node_name]
             lifted_inputs.append(parameter_name)
+            gm.meta[get_cloned_parameter_buffer_name(parameter_name)] = (
+                clone_preserve_strides(state_dict[parameter_name])
+            )
         elif node_name in graph_signature.inputs_to_buffers:
             buffer_name = graph_signature.inputs_to_buffers[node_name]
             lifted_inputs.append(buffer_name)
@@ -429,7 +431,7 @@ def _unlift_graph(
 
     from torch.export._unlift import _unlift
 
-    outputs = list(gm.graph.nodes)[-1].args[0]
+    outputs: tuple[torch.fx.Node] = tuple(gm.graph.output_node().args[0])  # type: ignore[arg-type]
     mutated_outputs = []
     buffer_mutations = graph_signature.buffers_to_mutate
     user_input_mutations = graph_signature.user_inputs_to_mutate
@@ -438,10 +440,11 @@ def _unlift_graph(
         value: Optional[Union[FQN, GraphInputName]] = None
 
         if idx < len(buffer_mutations) + len(user_input_mutations) + len(output_tokens):
-            if out.name in buffer_mutations:
-                value = buffer_mutations[out.name]
-            elif out.name in user_input_mutations:
-                value = user_input_mutations[out.name]
+            name = GraphOutputName(out.name)
+            if name in buffer_mutations:
+                value = buffer_mutations[name]
+            elif name in user_input_mutations:
+                value = user_input_mutations[name]
 
         mutated_outputs.append(value)
 
@@ -451,8 +454,6 @@ def _unlift_graph(
         mutated_outputs,
         pytree.LeafSpec(),
         None,
-        state_dict,
-        {},
     )
     return unlifted_gm
 

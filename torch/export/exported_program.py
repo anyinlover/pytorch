@@ -7,10 +7,10 @@ import functools
 import operator
 import types
 import warnings
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, final, Optional, TYPE_CHECKING, Union
+from typing import Any, Callable, final, NamedTuple, Optional, TYPE_CHECKING, Union
 
 from torch._guards import tracing, TracingContext
 from torch._higher_order_ops.utils import autograd_not_implemented
@@ -610,7 +610,7 @@ def _decompose_and_get_gm_with_new_signature_constants(
         raise RuntimeError(f"Type of old_arg not supported: {type(old_arg)}")
 
     new_placeholders = [node for node in gm.graph.nodes if node.op == "placeholder"]
-    new_outputs = list(gm.graph.nodes)[-1].args[0]
+    new_outputs: tuple[torch.fx.Node] = tuple(gm.graph.output_node().args[0])  # type: ignore[arg-type]
 
     # rename the placeholders
     assert len(new_placeholders) == len(old_placeholders)
@@ -654,9 +654,9 @@ def _decompose_and_get_gm_with_new_signature_constants(
 
     # update output specs
     gm.recompile()
-    for i, name in enumerate(_graph_output_names(gm)):
-        if isinstance(new_outputs[i], torch.fx.Node):
-            new_outputs[i].name = name
+    for output, name in zip(new_outputs, _graph_output_names(gm)):
+        if name is not None:
+            output.name = name
 
     # To match the output target with correct input for input mutations
     # need to find the old to new placeholder map
@@ -727,7 +727,7 @@ def _decompose_and_get_gm_with_new_signature_constants(
             for i, spec in enumerate(ep.graph_signature.input_specs)
             if isinstance(spec.arg, TensorArgument)
         }
-        for i, node in enumerate(new_outputs[len(output_specs) :]):
+        for node in new_outputs[len(output_specs) :]:
             source = gradients[node.name]
             spec = specs[source]  # type: ignore[index]
             if spec.kind == InputKind.PARAMETER:
@@ -1208,7 +1208,9 @@ class ExportedProgram:
     @property
     @compatibility(is_backward_compatible=False)
     def call_spec(self):
-        CallSpec = namedtuple("CallSpec", ["in_spec", "out_spec"])
+        class CallSpec(NamedTuple):
+            in_spec: Optional[pytree.TreeSpec]
+            out_spec: Optional[pytree.TreeSpec]
 
         if len(self.module_call_graph) == 0:
             return CallSpec(in_spec=None, out_spec=None)
@@ -1275,6 +1277,10 @@ class ExportedProgram:
     @compatibility(is_backward_compatible=False)
     def constants(self, value):
         raise RuntimeError("Unable to set ExportedProgram's constants attribute.")
+
+    @compatibility(is_backward_compatible=False)
+    def is_joint(self):
+        return self.graph_signature.backward_signature is not None
 
     def _get_flat_args_with_check(self, args, kwargs):
         """Flatten args, kwargs using pytree, then, check specs.
@@ -1419,7 +1425,7 @@ class ExportedProgram:
         )
         return string
 
-    def module(self) -> torch.nn.Module:
+    def module(self) -> torch.fx.GraphModule:
         """
         Returns a self contained GraphModule with all the parameters/buffers inlined.
         """
