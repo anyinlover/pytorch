@@ -200,7 +200,7 @@ class IndexType(IntFlag):
     BOOL_0D = FANCY | 128
 
 
-def _classify_index(idx):
+def _prepare_index(idx):
     """Classify an index element according to NumPy's indexing rules."""
     # Direct type mapping for common cases
     type_map = {
@@ -232,7 +232,7 @@ def _analyze_numpy_advanced_indexing(index):
     dimensions need to be moved to the front for NumPy compatibility.
     """
     index = index if isinstance(index, tuple) else (index,)
-    index_types = [_classify_index(idx) for idx in index]
+    index_types = [_prepare_index(idx) for idx in index]
 
     # NumPy's state machine: -1=init, 0=found_advanced, 1=gap_after_advanced, 2=separated
     state = -1
