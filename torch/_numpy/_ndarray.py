@@ -6,6 +6,7 @@ import builtins
 import math
 import operator
 from collections.abc import Sequence
+from enum import IntFlag
 
 import torch
 
@@ -185,130 +186,91 @@ def _upcast_int_indices(index):
 # =============================================================================
 
 # Index type constants matching NumPy's mapping.c
-HAS_INTEGER = 1
-HAS_NEWAXIS = 2
-HAS_SLICE = 4
-HAS_ELLIPSIS = 8
-HAS_FANCY = 16
-HAS_BOOL = 32
-HAS_SCALAR_ARRAY = 64
-HAS_0D_BOOL = HAS_FANCY | 128
+# Pythonic index type classification using IntFlag
+
+class IndexType(IntFlag):
+    INTEGER = 1
+    NEWAXIS = 2
+    SLICE = 4
+    ELLIPSIS = 8
+    FANCY = 16
+    BOOL = 32
+    SCALAR_ARRAY = 64
+    BOOL_0D = FANCY | 128
 
 
-def _classify_index_type(idx):
-    """
-    Classify an index according to NumPy's type system.
-
-    Matches the classification logic from NumPy's mapping.c.
-    """
-    if idx is None:
-        return HAS_NEWAXIS
-    elif idx is ...:
-        return HAS_ELLIPSIS
-    elif isinstance(idx, slice):
-        return HAS_SLICE
-    elif isinstance(idx, int):
-        return HAS_INTEGER
-    elif isinstance(idx, torch.Tensor):
+def _classify_index(idx):
+    """Classify an index element according to NumPy's indexing rules."""
+    # Direct type mapping for common cases
+    type_map = {
+        type(None): IndexType.NEWAXIS,
+        type(...): IndexType.ELLIPSIS,
+        slice: IndexType.SLICE,
+        int: IndexType.INTEGER,
+        list: IndexType.FANCY,
+    }
+    
+    if type(idx) in type_map:
+        return type_map[type(idx)]
+    
+    # Handle tensors with dtype/ndim checks
+    if isinstance(idx, torch.Tensor):
         if idx.dtype == torch.bool:
-            if idx.ndim == 0:
-                return HAS_0D_BOOL
-            return HAS_BOOL
-        elif idx.ndim == 0:
-            # 0-d tensor is treated as integer index
-            return HAS_INTEGER
-        else:
-            # Multi-dimensional tensor is fancy indexing
-            return HAS_FANCY
-    elif isinstance(idx, list):
-        # Lists are always fancy indexing
-        return HAS_FANCY
-
-    # Default for other scalars (numpy scalars, etc.)
-    return HAS_INTEGER
+            return IndexType.BOOL_0D if idx.ndim == 0 else IndexType.BOOL
+        return IndexType.INTEGER if idx.ndim == 0 else IndexType.FANCY
+    
+    # Default for numpy scalars, etc.
+    return IndexType.INTEGER
 
 
 def _analyze_numpy_advanced_indexing(index):
     """
-    Analyze indexing pattern using NumPy's exact state machine logic.
-
-    This follows the consecutive/non-consecutive detection from NumPy's
-    mapiter_fill_info function in mapping.c lines 2445-2474.
-
-    State machine:
-    -1: initial state
-     0: found fancy/integer index
-     1: found non-fancy after fancy (gap detected)
-     2: found fancy after gap (non-consecutive)
-
-    Args:
-        index: The indexing tuple
-
-    Returns:
-        tuple: (index, transpose_info or None)
+    Analyze indexing pattern using NumPy's consecutive/separated detection logic.
+    
+    Returns (index, transpose_info) where transpose_info indicates if broadcast
+    dimensions need to be moved to the front for NumPy compatibility.
     """
-    if not isinstance(index, tuple):
-        index = (index,)
-
-    # Classify each index element
-    index_types = [_classify_index_type(idx) for idx in index]
-
-    # NumPy's state machine for consecutive detection
-    consec_status = (
-        -1
-    )  # -1 init; 0 found fancy; 1 fancy stopped; 2 found not consecutive fancy
-    consec_position = 0  # Where fancy indices are positioned (result_dim in NumPy)
-    result_dim = 0  # Tracks dimension position for non-fancy indices
-
+    index = index if isinstance(index, tuple) else (index,)
+    index_types = [_classify_index(idx) for idx in index]
+    
+    # NumPy's state machine: -1=init, 0=found_advanced, 1=gap_after_advanced, 2=separated
+    state = -1
+    consec_position = 0
+    result_dim = 0
     advanced_positions = []
-
+    
     for i, idx_type in enumerate(index_types):
-        # Track advanced index positions
-        if idx_type & (HAS_FANCY | HAS_INTEGER):
+        is_advanced = idx_type & (IndexType.FANCY | IndexType.INTEGER)
+        
+        if is_advanced:
             advanced_positions.append(i)
-
-            # integer and fancy indexes are transposed together (NumPy line 2456-2457)
-            if idx_type & (HAS_FANCY | HAS_INTEGER):
-                # there was no previous fancy index, so set consec (NumPy line 2458-2462)
-                if consec_status == -1:
-                    consec_position = result_dim
-                    consec_status = 0
-                # there was already a non-fancy index after a fancy one (NumPy line 2463-2467)
-                elif consec_status == 1:
-                    consec_status = 2
-                    consec_position = 0  # Mark as non-consecutive
+            if state == -1:  # First advanced index
+                consec_position = result_dim
+                state = 0
+            elif state == 1:  # Advanced after gap -> separated
+                state = 2
+                consec_position = 0
         else:
-            # consec_status == 0 means there was a fancy index before (NumPy line 2470-2474)
-            if consec_status == 0:
-                consec_status = 1
-
-        # Track result dimensions for positioning (only for non-fancy indices that add dims)
-        if idx_type & (HAS_SLICE | HAS_NEWAXIS):
-            if idx_type == HAS_SLICE:
-                result_dim += 1
-            elif idx_type == HAS_NEWAXIS:
-                result_dim += 1
-
+            if state == 0:  # Gap after advanced index
+                state = 1
+        
+        # Count dimensions added by slices/newaxis
+        if idx_type in (IndexType.SLICE, IndexType.NEWAXIS):
+            result_dim += 1
+    
     if not advanced_positions:
         return index, None
-
-    # NumPy rule: consec_status == 2 or consec_position == 0 means non-consecutive
-    # This triggers vectorized indexing (broadcast dims move to front)
-    is_separated = (consec_status == 2) or (
-        consec_position == 0 and consec_status != -1
-    )
-
-    if is_separated:
-        return index, {
-            "advanced_positions": advanced_positions,
-            "separated": True,
-            "move_to_front": True,
-            "consec_position": consec_position,
-            "consec_status": consec_status,
-        }
-
-    # Adjacent/consecutive indices stay in place - no transpose needed
-    return index, None
+    
+    # Separated if explicitly detected or starting at position 0 with advanced indices
+    is_separated = state == 2 or (consec_position == 0 and state != -1)
+    
+    return (index, {
+        "advanced_positions": advanced_positions,
+        "separated": is_separated,
+        "move_to_front": is_separated,
+        "consec_position": consec_position,
+        "consec_status": state,
+    }) if is_separated else (index, None)
 
 
 def _numpy_style_advanced_indexing(tensor, index):
@@ -376,52 +338,17 @@ def _numpy_style_advanced_setitem(tensor, index, value):
 
 
 def _numpy_get_transpose(fancy_ndim, consec, ndim, getmap):
-    """
-    Calculate transpose axes exactly as NumPy does in _get_transpose.
-
-    This is a direct translation of NumPy's _get_transpose function from
-    mapping.c lines 79-112.
-
-    Args:
-        fancy_ndim (int): Number of dimensions from advanced indexing (n1)
-        consec (int): Position where fancy indices should be inserted (n2)
-        ndim (int): Total number of dimensions in result (n3)
-        getmap (bool): True for getitem, False for setitem
-
-    Returns:
-        list: Transpose axes, or None if no transpose needed
-    """
+    """Calculate transpose axes using NumPy's algorithm for consecutive indices."""
     if consec == 0 or fancy_ndim == 0:
-        # No transpose needed when consec=0 (non-consecutive) or no fancy dims
         return None
-
-    n1 = fancy_ndim
-    n2 = consec
-    n3 = ndim
-
-    # use n1 as the boundary if getting but n2 if setting
+    
+    n1, n2, n3 = fancy_ndim, consec, ndim
     bnd = n1 if getmap else n2
-    dims = []
-
-    # First part: (n1,...,n1+n2-1) for getmap or (n2,...,n1+n2-1) for setmap
-    val = bnd
-    while val < n1 + n2:
-        dims.append(val)
-        val += 1
-
-    # Second part: (0,...,n1-1) for getmap or (0,...,n2-1) for setmap
-    val = 0
-    while val < bnd:
-        dims.append(val)
-        val += 1
-
-    # Third part: (n1+n2,...,n3-1)
-    val = n1 + n2
-    while val < n3:
-        dims.append(val)
-        val += 1
-
-    return dims
+    
+    # Build transpose axes in three parts following NumPy's pattern
+    return (list(range(bnd, n1 + n2)) +           # First part
+            list(range(bnd)) +                     # Second part  
+            list(range(n1 + n2, n3)))             # Third part
 
 
 def _calculate_transpose_axes_for_separated_indices(
@@ -429,124 +356,43 @@ def _calculate_transpose_axes_for_separated_indices(
 ):
     """
     Calculate transpose axes when advanced indices are separated.
-
-    Key insight: NumPy's MapIter puts advanced index dims at the front automatically
-    for separated indices, then only transposes back for consecutive cases (consec != 0).
-    PyTorch keeps dims in their original positions, so we need different logic.
-
-    Args:
-        result_tensor: The tensor resulting from PyTorch's indexing
-        index_tuple: The original indexing tuple
-        advanced_positions: Positions of advanced indices
-        transpose_info: Info dict from _analyze_numpy_advanced_indexing
-
-    Returns:
-        list or None: Transpose axes, or None if no transpose needed
+    
+    For separated indices, PyTorch keeps dims in place but NumPy moves broadcast
+    dims to front. We only transpose when needed.
     """
     result_ndim = result_tensor.ndim
-
     if result_ndim < 2:
         return None
-
-    # Extract info from NumPy-style analysis
+    
     consec_position = transpose_info.get("consec_position", 0)
     consec_status = transpose_info.get("consec_status", -1)
-
-    # For separated indices (consec_status == 2), we need to check if PyTorch's result
-    # already matches NumPy's expected layout
-    if consec_status == 2:
-        # IMPORTANT: Recent versions of PyTorch may already produce NumPy-compatible
-        # layouts for separated advanced indices. We should only transpose if needed.
-
-        # The key insight: for separated advanced indices, NumPy moves broadcast
-        # dimensions to the front. But PyTorch might already do this correctly.
-
-        # Strategy: Detect when PyTorch's layout differs from NumPy's expected layout
-        # Count only the actual fancy indices (lists/arrays), not scalar integers
-        num_fancy_indices = sum(
-            1
-            for pos in advanced_positions
-            if isinstance(index_tuple[pos], (list, torch.Tensor))
-            and not isinstance(index_tuple[pos], slice)
+    
+    if consec_status == 2:  # Separated indices
+        # Count actual fancy indices (not just scalars)
+        fancy_indices = [pos for pos in advanced_positions 
+                        if isinstance(index_tuple[pos], (list, torch.Tensor))
+                        and not isinstance(index_tuple[pos], slice)]
+        
+        if len(fancy_indices) == 1:
+            # Single separated fancy index: always needs transpose for NumPy compatibility
+            fancy_pos = fancy_indices[0]
+            slice_dims_before = sum(1 for i in range(fancy_pos) 
+                                   if isinstance(index_tuple[i], slice))
+            
+            if 0 < slice_dims_before < result_ndim:
+                # Move broadcast dimension to front
+                axes = list(range(result_ndim))
+                return [slice_dims_before] + axes[:slice_dims_before] + axes[slice_dims_before+1:]
+        
+        # Multiple separated indices: PyTorch usually already correct
+        return None
+    
+    elif consec_position > 0:  # Consecutive indices
+        # Use NumPy's transpose for consecutive case
+        return _numpy_get_transpose(
+            fancy_ndim=1, consec=consec_position, ndim=result_ndim, getmap=True
         )
-
-        if num_fancy_indices == 1:
-            # Single separated fancy index case (list or array, not just scalar)
-            # PyTorch uses "outer indexing" which keeps dimensions in place
-            # NumPy uses "vectorized indexing" which moves broadcast dims to front
-
-            # Find the position of the actual fancy index (list/array)
-            fancy_pos = None
-            for pos in advanced_positions:
-                if isinstance(
-                    index_tuple[pos], (list, torch.Tensor)
-                ) and not isinstance(index_tuple[pos], slice):
-                    fancy_pos = pos
-                    break
-
-            if fancy_pos is not None:
-                # For single separated fancy indices, we always need to move the
-                # broadcast dimension to the front to match NumPy's behavior
-
-                # Find where the fancy index dimension appears in the result
-                slice_dims_before = sum(
-                    1 for i in range(fancy_pos) if isinstance(index_tuple[i], slice)
-                )
-
-                # The fancy indexing dimension is at this position
-                advanced_dim_pos = slice_dims_before
-
-                if advanced_dim_pos > 0 and advanced_dim_pos < result_ndim:
-                    # Move this dimension to the front
-                    axes = list(range(result_ndim))
-                    axes.pop(advanced_dim_pos)
-                    axes.insert(0, advanced_dim_pos)
-                    return axes
-
-        else:
-            # Multiple separated advanced indices
-            # For modern PyTorch, the result is often already in the correct format
-            # We only need to transpose if PyTorch puts the broadcast dimension
-            # in the wrong position
-
-            # Check if the result shape suggests the broadcast dims are not at front
-            first_advanced_pos = min(advanced_positions)
-            slice_dims_before = sum(
-                1
-                for i in range(first_advanced_pos)
-                if isinstance(index_tuple[i], slice)
-            )
-
-            # IMPORTANT: For multiple separated advanced indices, modern PyTorch
-            # often produces the correct layout already. Only transpose if we can
-            # definitively detect that it's wrong.
-
-            # Heuristic: if there are slices before the first advanced index,
-            # and the result has the pattern where the slice dimensions come first,
-            # then the broadcast dimensions might not be at the front
-            if (
-                slice_dims_before > 0
-                and result_ndim > slice_dims_before
-                and result_ndim > 2
-            ):  # Only for non-trivial cases
-                # Be very conservative - only transpose for specific patterns
-                # that we know are definitely wrong
-
-                # For now, let's not transpose for multiple advanced indices
-                # since PyTorch's behavior seems to match NumPy's in many cases
-                pass
-
-    # For consecutive indices or when consec_position != 0, use NumPy's logic
-    elif consec_position > 0:
-        fancy_ndim = 1  # Assume single broadcast dimension for simplicity
-        transpose_axes = _numpy_get_transpose(
-            fancy_ndim=fancy_ndim,
-            consec=consec_position,
-            ndim=result_ndim,
-            getmap=True,  # This is for getitem operation
-        )
-        return transpose_axes
-
+    
     return None
 
 
