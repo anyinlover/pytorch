@@ -5,6 +5,11 @@ import logging
 import torch
 
 from .. import ir
+from ..lookup_table import (
+    lookup_op_configs_by_template_id,
+    lookup_op_configs_for_template_id,
+    lookup_table_extract_choice,
+)
 from ..lowering import lowerings
 from ..select_algorithm import (
     autotune_select_algorithm,
@@ -152,20 +157,26 @@ def tuned_mm_plus_mm(mat1, mat2, mat3, mat4, *, layout=None):
         else []
     )
 
+    # Get lookup table configs grouped by template_id
+    op_lookup_dict = lookup_op_configs_by_template_id(
+        [mat1, mat2, mat3, mat4], "mm_plus_mm"
+    )
     mm_configs = V.choices.get_mm_plus_mm_configs(device_type)
 
     if use_triton_template(layout1):
-        # Get template params using helper function (without dtype.itemsize for mm_plus_mm)
-        template_params = get_triton_mm_params(
-            [mat1, mat2, mat3, mat4],
-            "mm_plus_mm",
-            m1,
-            n1,
-            k1,
-            layout1,
-            device_type,
-            mm_configs,
-        )
+        # Use lookup table if available, otherwise fall back to existing logic
+        template_params = lookup_op_configs_for_template_id(op_lookup_dict, "triton")
+        if template_params is None:
+            template_params = get_triton_mm_params(
+                [mat1, mat2, mat3, mat4],
+                "mm_plus_mm",
+                m1,
+                n1,
+                k1,
+                layout1,
+                device_type,
+                mm_configs,
+            )
 
         # Apply BLOCK_K constraint specific to mm_plus_mm
         filtered_params = []
@@ -185,6 +196,9 @@ def tuned_mm_plus_mm(mat1, mat2, mat3, mat4, *, layout=None):
             if e is None:
                 # This means we successfully appended a choice
                 log.debug("added choice %r with kwargs %r", choices[-1].name, kwargs)
+
+    # Safe noop if lookup table is not in use
+    choices, _ = lookup_table_extract_choice(choices)
 
     return autotune_select_algorithm(
         "mm_plus_mm", choices, [mat1, mat2, mat3, mat4], layout1

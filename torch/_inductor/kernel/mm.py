@@ -24,7 +24,12 @@ from ..codegen.cuda.gemm_template import CUTLASS2xGemmTemplate, CUTLASS3xGemmTem
 from ..codegen.rocm.ck_tile_universal_gemm_template import CKTileGemmTemplate
 from ..codegen.rocm.ck_universal_gemm_template import CKGemmTemplate
 from ..codegen.subgraph import SubgraphTemplate
-from ..ir import FlexibleLayout, is_triton
+from ..ir import is_triton
+from ..lookup_table import (
+    lookup_op_configs_by_template_id,
+    lookup_op_configs_for_template_id,
+    lookup_table_extract_choice,
+)
 from ..lowering import (
     add_layout_constraint,
     constrain_to_fx_strides,
@@ -657,6 +662,19 @@ def decomposeK(a, b, k_splits):
     return reduced_buf.to(a.dtype)
 
 
+def _flexible_layout(layout):
+    """
+    provide flexible layout from |layout| if not already
+    """
+    # TODO(coconutruben): make hashable to use lru_cache here
+    from torch._inductor.ir import FlexibleLayout
+
+    if isinstance(layout, FlexibleLayout):
+        return layout
+    assert layout is not None
+    return FlexibleLayout(device=layout.device, dtype=layout.dtype, size=layout.size)
+
+
 @register_lowering(aten.mm, type_promotion_kind=None)
 def tuned_mm(mat1, mat2, *, layout=None):
     """
@@ -680,9 +698,7 @@ def tuned_mm(mat1, mat2, *, layout=None):
 
     aten_layout = layout
     if not (inductor_config.max_autotune or inductor_config.max_autotune_gemm):
-        aten_layout = FlexibleLayout(
-            device=layout.device, dtype=layout.dtype, size=layout.size
-        )
+        aten_layout = _flexible_layout(aten_layout)
 
     # options to tune from
     choices = (
@@ -690,46 +706,50 @@ def tuned_mm(mat1, mat2, *, layout=None):
     )
     static_shape, is_nonzero = _is_static_problem(layout)
 
+    # Get lookup table configs grouped by template_id
+    op_lookup_dict = lookup_op_configs_by_template_id([mat1, mat2], name)
     mm_configs = V.choices.get_base_mm_configs(device_type)
     persistent_mm_configs = V.choices.get_persistent_mm_configs(device_type)
     extra_mm_configs = V.choices.get_extra_mm_configs(device_type)
 
     if is_nonzero and use_triton_template(layout):
-        # Get template params using helper function
-        template_params = get_triton_mm_params(
-            [mat1, mat2],
-            "mm",
-            m,
-            n,
-            k,
-            layout,
-            device_type,
-            mm_configs,
-        )
+        # Use lookup table if available, otherwise fall back to existing logic
+        template_params = lookup_op_configs_for_template_id(op_lookup_dict, "triton")
+        if template_params is None:
+            template_params = get_triton_mm_params(
+                [mat1, mat2], name, m, n, k, layout, device_type, mm_configs
+            )
 
         for kwargs in template_params:
-            mm_template.maybe_append_choice(
+            e = mm_template.maybe_append_choice(
                 choices,
                 input_nodes=(mat1, mat2),
                 layout=layout,
                 **kwargs,
             )
+            if e is None:
+                # This means we successfully appended a choice
+                log.debug("added choice %r with kwargs %r", choices[-1].name, kwargs)
 
         if use_triton_tma_template(mat1, mat2):
-            # Get TMA template params using helper function
-            tma_template_params = get_triton_mm_tma_params(
-                [mat1, mat2],
-                "mm",
-                m,
-                n,
-                k,
-                layout,
-                device_type,
-                persistent_mm_configs,
+            # Use lookup table if available, otherwise fall back to existing logic
+            tma_template_params = lookup_op_configs_for_template_id(
+                op_lookup_dict, "tma"
             )
+            if tma_template_params is None:
+                tma_template_params = get_triton_mm_tma_params(
+                    [mat1, mat2],
+                    name,
+                    m,
+                    n,
+                    k,
+                    layout,
+                    device_type,
+                    persistent_mm_configs,
+                )
 
             for kwargs in tma_template_params:
-                persistent_tma_mm_template.maybe_append_choice(
+                e = persistent_tma_mm_template.maybe_append_choice(
                     choices,
                     input_nodes=(mat1, mat2),
                     layout=layout,
@@ -739,6 +759,11 @@ def tuned_mm(mat1, mat2, *, layout=None):
                     ),
                     **kwargs,
                 )
+                if e is None:
+                    # This means we successfully appended a choice
+                    log.debug(
+                        "added choice %r with kwargs %r", choices[-1].name, kwargs
+                    )
 
         from torch._inductor.ir import get_free_symbols
 
@@ -754,11 +779,20 @@ def tuned_mm(mat1, mat2, *, layout=None):
             )
         )
         if use_decompose_k_choice(m, n, k) and not unbacked_symbols:
+            decompose_k_params = lookup_op_configs_for_template_id(
+                op_lookup_dict, "decompose_k"
+            )
+            if decompose_k_params is None:
+                # Fallback to default configs if no lookup table exists
+                k_splits = get_k_splits(m, n, k)
+            else:
+                # if the lookup table exists and has a decompose_k entries, we use them
+                k_splits = [int(entry["k"]) for entry in decompose_k_params]
+
             from torch._dispatch.python import enable_python_dispatcher
 
             from ..decomposition import select_decomp_table
 
-            k_splits = get_k_splits(m, n, k)
             for k_split in k_splits:
                 if not V.graph.sizevars.statically_known_true(
                     sympy.Eq(sympy.Mod(k, k_split), 0)
@@ -853,7 +887,17 @@ def tuned_mm(mat1, mat2, *, layout=None):
 
     for k in inductor_config.external_matmul:
         choices.append(lazy_register_extern_choice(k).bind((mat1, mat2), layout))
-
+    # Safe noop if lookup table is not in use
+    choices, using_aten = lookup_table_extract_choice(choices)
+    if using_aten:
+        # using_aten will only ever be True if the lookup table is in use,
+        # so falling back to the flexible layout is safe
+        assert len(choices) == 1
+        choices = (
+            [aten_mm.bind((mat1, mat2), _flexible_layout(aten_layout))]
+            if use_aten_gemm_kernels()
+            else []
+        )
     return autotune_select_algorithm(name, choices, [mat1, mat2], layout)
 
 
@@ -910,10 +954,13 @@ def tuned_int_mm(mat1, mat2, *, layout=None):
 
 @register_lowering(aten.addmm, type_promotion_kind=None)
 def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
+    """
+    Lowering for autotuning aten.addmm with different backends (Aten, Triton, CUTLASS, etc.)
+    """
     device_type = ir.get_device_type(mat1)
     m, n, k, layout, mat1, mat2, inp_expanded = mm_args(mat1, mat2, inp, layout=layout)
     static_shape, is_nonzero = _is_static_problem(layout)
-
+    name = "addmm"
     # below is for getting an overview logging info of inductor mms
     counters["aten_mm_info"][f"aten.addmm_{m}_{n}_{k}"] += 1
     log.info(
@@ -931,12 +978,7 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
     ):
         # Use a FlexibleLayout if we are not autotuning.
         # This allows padding strides for the output.
-        from torch._inductor.ir import FixedLayout, FlexibleLayout
-
-        if isinstance(layout, FixedLayout):
-            layout = FlexibleLayout(
-                device=layout.device, dtype=layout.dtype, size=layout.size
-            )
+        layout = _flexible_layout(layout)
         choices = (
             [
                 aten_addmm.bind(
@@ -964,38 +1006,50 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
         else []
     )
 
+    # Get lookup table configs grouped by template_id
+    op_lookup_dict = lookup_op_configs_by_template_id([inp_expanded, mat1, mat2], name)
     if (
         use_aten_gemm_kernels()
         and inp_expanded.get_stride()[0] == 0
         and inp_expanded.get_device().type == "cuda"
         and inductor_config.triton.autotune_cublasLt
     ):
-        # unexpand inp to make sure fused addmm from cublasLt is used
-        choices.insert(
-            0,
-            aten_bias_addmm.bind(
-                (inp_expanded, mat1, mat2), layout, alpha=alpha, beta=beta
-            ),
+        # Safe noop if lookup table is not in use
+        bias_addmm_params = lookup_op_configs_for_template_id(
+            op_lookup_dict, "bias_addmm"
         )
+        if bias_addmm_params is None or len(bias_addmm_params) > 0:
+            # Add the bias_addmm choice if
+            # - the lookup table is not in use, or
+            # - the lookup table is in use and requesting it (len > 0)
+            c = aten_bias_addmm.bind(
+                (inp_expanded, mat1, mat2), layout, alpha=alpha, beta=beta
+            )
+            # lookup table filtering behavior requires this choice to be added
+            # at the end, after the default ATEN choice
+            idx = len(choices) if bias_addmm_params is not None else 0
+            choices.insert(idx, c)
 
     mm_configs = V.choices.get_base_mm_configs(device_type)
     persistent_mm_configs = V.choices.get_persistent_mm_configs(device_type)
 
     if is_nonzero and use_triton_template(layout):
-        # Get template params using helper function
-        template_params = get_triton_mm_params(
-            [inp_expanded, mat1, mat2],
-            "addmm",
-            m,
-            n,
-            k,
-            layout,
-            device_type,
-            mm_configs,
-        )
+        # Use lookup table if available, otherwise fall back to existing logic
+        template_params = lookup_op_configs_for_template_id(op_lookup_dict, "triton")
+        if template_params is None:
+            template_params = get_triton_mm_params(
+                [inp_expanded, mat1, mat2],
+                name,
+                m,
+                n,
+                k,
+                layout,
+                device_type,
+                mm_configs,
+            )
 
         for kwargs in template_params:
-            mm_template.maybe_append_choice(
+            e = mm_template.maybe_append_choice(
                 choices,
                 input_nodes=(inp_expanded, mat1, mat2),
                 layout=layout,
@@ -1004,22 +1058,29 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
                 epilogue_fn=addmm_epilogue(layout.dtype, alpha, beta),
                 epilogue_fn_hash=str(["addmm_epilogue", layout.dtype, alpha, beta]),
             )
+            if e is None:
+                # This means we successfully appended a choice
+                log.debug("added choice %r with kwargs %r", choices[-1].name, kwargs)
 
         if use_triton_tma_template(mat1, mat2):
-            # Get TMA template params using helper function
-            tma_template_params = get_triton_mm_tma_params(
-                [inp_expanded, mat1, mat2],
-                "addmm",
-                m,
-                n,
-                k,
-                layout,
-                device_type,
-                persistent_mm_configs,
+            # Use lookup table if available, otherwise fall back to existing logic
+            tma_template_params = lookup_op_configs_for_template_id(
+                op_lookup_dict, "tma"
             )
+            if tma_template_params is None:
+                tma_template_params = get_triton_mm_tma_params(
+                    [inp_expanded, mat1, mat2],
+                    name,
+                    m,
+                    n,
+                    k,
+                    layout,
+                    device_type,
+                    persistent_mm_configs,
+                )
 
             for kwargs in tma_template_params:
-                persistent_tma_mm_template.maybe_append_choice(
+                e = persistent_tma_mm_template.maybe_append_choice(
                     choices,
                     input_nodes=(inp_expanded, mat1, mat2),
                     layout=layout,
@@ -1031,6 +1092,11 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
                     prefix_args=1,
                     epilogue_fn=addmm_epilogue(layout.dtype, alpha, beta),
                 )
+                if e is None:
+                    # This means we successfully appended a choice
+                    log.debug(
+                        "added choice %r with kwargs %r", choices[-1].name, kwargs
+                    )
 
     if (
         is_nonzero
@@ -1066,6 +1132,26 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
             has_bias=True,
         )
 
+    # Safe noop if lookup table is not in use
+    choices, using_aten = lookup_table_extract_choice(choices)
+    if using_aten:
+        # using_aten will only ever be True if the lookup table is in use,
+        # so falling back to the flexible layout is safe
+        assert len(choices) == 1
+        layout = _flexible_layout(layout)
+        choices = (
+            [
+                aten_addmm.bind(
+                    (inp, mat1, mat2),
+                    layout,
+                    alpha=alpha,
+                    beta=beta,
+                )
+            ]
+            if use_aten_gemm_kernels()
+            else []
+        )
+        return autotune_select_algorithm("addmm", choices, [inp, mat1, mat2], layout)
     return autotune_select_algorithm(
         "addmm", choices, [inp_expanded, mat1, mat2], layout
     )
