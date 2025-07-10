@@ -315,7 +315,6 @@ class AOTAutogradCacheDetails(FxGraphHashDetails):
             [],
             [],
         )
-
         if hasattr(gm, "saved_tensors_hooks_pack_0"):
 
             def _add_wrapped_user_cache_hashes(_gm, _l):
@@ -333,6 +332,8 @@ class AOTAutogradCacheDetails(FxGraphHashDetails):
             )
 
         try:
+            # When saving the gm for cache key calculation,
+            # first normalize placeholder names so that otherwise
             # FXGraphCache has constraints on what can be pickled in its inductor
             # config. Check that the gm is cacheable by inductor first,
             # and if it raises an exception, also bypass on our end.
@@ -380,6 +381,57 @@ class AOTAutogradCachePickler(FxGraphCachePickler):
         return (_ident, (metadata,))
 
 
+@contextlib.contextmanager
+def normalize_placeholder_names(gm: torch.fx.GraphModule):
+    """
+    Context manager that normalizes the placeholder names in the graph module.
+    This is used while generating a cache key for AOTAutogradCache, so that two graphs
+    that are isomorphic when normalizing names can hit the same cache entry.
+    This is safe because nothing underneath AOTAutograd uses the node names on the
+    original dynamo graph: AOTAutograd re-traces with its own nodes, and guards are
+    in terms of original sources rather than placeholder names.
+    """
+    # Standalone inductor: we're bypassing AOTAutogradCache anyway, so return the graph
+    # as-is
+    if not hasattr(gm, "graph"):
+        yield
+        return
+
+    # Track all the old state of placeholders
+    old_placeholder_names = []
+    old_used_names = copy(gm.graph._graph_namespace._used_names)
+    i = 0
+    for n in gm.graph.find_nodes(op="placeholder", sort=True):
+        if n.type != torch.SymInt:
+            # _rename renames the node in the body of the function,
+            # but it doesn't change the raw name from node.target
+            # So we also set the raw_name of node.target to a new placeholder name
+            new_placeholder_name = f"p_{i}"
+            old_placeholder_names.append((n.name, n.target))
+            n.target = new_placeholder_name
+            n._rename(new_placeholder_name)
+            i += 1
+    gm.recompile()
+    try:
+        yield
+    finally:
+        # Used_names contains all our old placeholder names,
+        # so we clear it temporarily when we put them back
+        gm.graph._graph_namespace._used_names = set()
+        # Restore the placeholder names
+        i = 0
+        for n in gm.graph.find_nodes(op="placeholder", sort=True):
+            if n.type != torch.SymInt:
+                (name, target) = old_placeholder_names[i]
+                n.target = target
+                n._rename(name)
+                i += 1
+        assert i == len(old_placeholder_names)
+        # Now restore the old namespace's used names
+        gm.graph._graph_namespace._used_names = old_used_names
+        gm.recompile()
+
+
 def autograd_cache_key(
     gm: torch.fx.GraphModule,
     example_inputs,
@@ -403,7 +455,6 @@ def autograd_cache_key(
 
         if triton.__version__ < "3.2.0":
             raise BypassAOTAutogradCache("AOTAutogradCache requires triton 3.2.0")
-
     details = AOTAutogradCacheDetails(gm, example_inputs, config, fx_config)
     pickler = AOTAutogradCachePickler(gm)
     # The prefix distinguishes among the other kinds of objects we cache
@@ -931,10 +982,11 @@ def sanitize_gm_for_cache(gm: torch.fx.GraphModule):
         saved_fields[field] = getattr(gm, field, None)
         # Clear the field
         setattr(gm, field, None)
+        gm.meta = {}
     try:
-        yield
+        with normalize_placeholder_names(gm):
+            yield
     finally:
-        # Put the fields back after dispatch_and_compile is complete
         for field, value in saved_fields.items():
             setattr(gm, field, value)
 
