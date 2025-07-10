@@ -424,6 +424,57 @@ class TestAdvancedIndexing(TestCase):
         ]
         self._test_cases(cases, "Special cases")
 
+    def test_numpy_state_machine_edge_cases(self):
+        """Test edge cases that specifically verify NumPy's state machine logic."""
+        cases = [
+            # Integer indices mixed with advanced indices - NumPy treats these together
+            {
+                "shape": (3, 4, 5, 6),
+                "index": (0, [1, 2], slice(None), 3),
+                "name": "Integer-fancy-slice-integer pattern",
+            },
+            {
+                "shape": (4, 5, 6),
+                "index": ([0, 1], 2, [3, 4]),
+                "name": "Fancy-integer-fancy pattern",
+            },
+            # Ellipsis handling
+            {
+                "shape": (3, 4, 5, 6),
+                "index": (..., [1, 2], slice(None)),
+                "name": "Ellipsis before advanced index",
+            },
+            {
+                "shape": (3, 4, 5, 6),
+                "index": ([0, 1], ..., 2),
+                "name": "Advanced index with ellipsis",
+            },
+            # Newaxis (None) handling
+            {
+                "shape": (3, 4, 5),
+                "index": (None, [1, 2], slice(None)),
+                "name": "Newaxis before advanced index",
+            },
+            {
+                "shape": (3, 4, 5),
+                "index": ([1, 2], None, slice(None)),
+                "name": "Advanced index with newaxis",
+            },
+            # Multiple advanced indices with complex separations
+            {
+                "shape": (3, 4, 5, 6, 7),
+                "index": ([0, 1], slice(None), [2, 3], slice(1, 3), [4, 5]),
+                "name": "Multiple separated advanced indices",
+            },
+            # Edge case: all indices are advanced
+            {
+                "shape": (3, 4, 5),
+                "index": ([0, 1], [2, 3], [1, 4]),
+                "name": "All advanced indices",
+            },
+        ]
+        self._test_cases(cases, "NumPy state machine edge cases")
+
 
 if __name__ == "__main__":
     run_tests()
