@@ -188,6 +188,7 @@ def _upcast_int_indices(index):
 # Index type constants matching NumPy's mapping.c
 # Pythonic index type classification using IntFlag
 
+
 class IndexType(IntFlag):
     INTEGER = 1
     NEWAXIS = 2
@@ -209,16 +210,16 @@ def _classify_index(idx):
         int: IndexType.INTEGER,
         list: IndexType.FANCY,
     }
-    
+
     if type(idx) in type_map:
         return type_map[type(idx)]
-    
+
     # Handle tensors with dtype/ndim checks
     if isinstance(idx, torch.Tensor):
         if idx.dtype == torch.bool:
             return IndexType.BOOL_0D if idx.ndim == 0 else IndexType.BOOL
         return IndexType.INTEGER if idx.ndim == 0 else IndexType.FANCY
-    
+
     # Default for numpy scalars, etc.
     return IndexType.INTEGER
 
@@ -226,22 +227,22 @@ def _classify_index(idx):
 def _analyze_numpy_advanced_indexing(index):
     """
     Analyze indexing pattern using NumPy's consecutive/separated detection logic.
-    
+
     Returns (index, transpose_info) where transpose_info indicates if broadcast
     dimensions need to be moved to the front for NumPy compatibility.
     """
     index = index if isinstance(index, tuple) else (index,)
     index_types = [_classify_index(idx) for idx in index]
-    
+
     # NumPy's state machine: -1=init, 0=found_advanced, 1=gap_after_advanced, 2=separated
     state = -1
     consec_position = 0
     result_dim = 0
     advanced_positions = []
-    
+
     for i, idx_type in enumerate(index_types):
         is_advanced = idx_type & (IndexType.FANCY | IndexType.INTEGER)
-        
+
         if is_advanced:
             advanced_positions.append(i)
             if state == -1:  # First advanced index
@@ -253,24 +254,31 @@ def _analyze_numpy_advanced_indexing(index):
         else:
             if state == 0:  # Gap after advanced index
                 state = 1
-        
+
         # Count dimensions added by slices/newaxis
         if idx_type in (IndexType.SLICE, IndexType.NEWAXIS):
             result_dim += 1
-    
+
     if not advanced_positions:
         return index, None
-    
+
     # Separated if explicitly detected or starting at position 0 with advanced indices
     is_separated = state == 2 or (consec_position == 0 and state != -1)
-    
-    return (index, {
-        "advanced_positions": advanced_positions,
-        "separated": is_separated,
-        "move_to_front": is_separated,
-        "consec_position": consec_position,
-        "consec_status": state,
-    }) if is_separated else (index, None)
+
+    return (
+        (
+            index,
+            {
+                "advanced_positions": advanced_positions,
+                "separated": is_separated,
+                "move_to_front": is_separated,
+                "consec_position": consec_position,
+                "consec_status": state,
+            },
+        )
+        if is_separated
+        else (index, None)
+    )
 
 
 def _numpy_style_advanced_indexing(tensor, index):
@@ -341,14 +349,16 @@ def _numpy_get_transpose(fancy_ndim, consec, ndim, getmap):
     """Calculate transpose axes using NumPy's algorithm for consecutive indices."""
     if consec == 0 or fancy_ndim == 0:
         return None
-    
+
     n1, n2, n3 = fancy_ndim, consec, ndim
     bnd = n1 if getmap else n2
-    
+
     # Build transpose axes in three parts following NumPy's pattern
-    return (list(range(bnd, n1 + n2)) +           # First part
-            list(range(bnd)) +                     # Second part  
-            list(range(n1 + n2, n3)))             # Third part
+    return (
+        list(range(bnd, n1 + n2))  # First part
+        + list(range(bnd))  # Second part
+        + list(range(n1 + n2, n3))
+    )  # Third part
 
 
 def _calculate_transpose_axes_for_separated_indices(
@@ -356,43 +366,51 @@ def _calculate_transpose_axes_for_separated_indices(
 ):
     """
     Calculate transpose axes when advanced indices are separated.
-    
+
     For separated indices, PyTorch keeps dims in place but NumPy moves broadcast
     dims to front. We only transpose when needed.
     """
     result_ndim = result_tensor.ndim
     if result_ndim < 2:
         return None
-    
+
     consec_position = transpose_info.get("consec_position", 0)
     consec_status = transpose_info.get("consec_status", -1)
-    
+
     if consec_status == 2:  # Separated indices
         # Count actual fancy indices (not just scalars)
-        fancy_indices = [pos for pos in advanced_positions 
-                        if isinstance(index_tuple[pos], (list, torch.Tensor))
-                        and not isinstance(index_tuple[pos], slice)]
-        
+        fancy_indices = [
+            pos
+            for pos in advanced_positions
+            if isinstance(index_tuple[pos], (list, torch.Tensor))
+            and not isinstance(index_tuple[pos], slice)
+        ]
+
         if len(fancy_indices) == 1:
             # Single separated fancy index: always needs transpose for NumPy compatibility
             fancy_pos = fancy_indices[0]
-            slice_dims_before = sum(1 for i in range(fancy_pos) 
-                                   if isinstance(index_tuple[i], slice))
-            
+            slice_dims_before = sum(
+                1 for i in range(fancy_pos) if isinstance(index_tuple[i], slice)
+            )
+
             if 0 < slice_dims_before < result_ndim:
                 # Move broadcast dimension to front
                 axes = list(range(result_ndim))
-                return [slice_dims_before] + axes[:slice_dims_before] + axes[slice_dims_before+1:]
-        
+                return (
+                    [slice_dims_before]
+                    + axes[:slice_dims_before]
+                    + axes[slice_dims_before + 1 :]
+                )
+
         # Multiple separated indices: PyTorch usually already correct
         return None
-    
+
     elif consec_position > 0:  # Consecutive indices
         # Use NumPy's transpose for consecutive case
         return _numpy_get_transpose(
             fancy_ndim=1, consec=consec_position, ndim=result_ndim, getmap=True
         )
-    
+
     return None
 
 
